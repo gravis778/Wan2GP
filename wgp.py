@@ -1,3 +1,20 @@
+import torch._dynamo
+torch._dynamo.config.verbose = True
+torch._dynamo.config.suppress_errors = True
+
+def compile_or_fallback(model, example_inputs):
+    try:
+        print("Attempting Torch compile...")
+        compiled_model = torch.compile(model)
+        # Optional: run a dry pass to trigger kernel compilation
+        compiled_model(*example_inputs)
+        print("Compilation succeeded.")
+        return compiled_model
+    except Exception as e:
+        print("⚠️ Compilation failed. Falling back to eager mode.")
+        print("Error:", e)
+        return model  # fallback to uncompiled model
+
 import os
 os.environ["GRADIO_LANG"] = "en"
 # # os.environ.pop("TORCH_LOGS", None)  # make sure no env var is suppressing/overriding
@@ -62,7 +79,7 @@ AUTOSAVE_FILENAME = "queue.zip"
 PROMPT_VARS_MAX = 10
 
 target_mmgp_version = "3.6.0"
-WanGP_version = "8.61"
+WanGP_version = "8.6"
 settings_version = 2.35
 max_source_video_frames = 3000
 prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer = None, None, None, None
@@ -356,7 +373,7 @@ def process_prompt_and_add_tasks(state, model_choice):
 
     outpainting_dims = get_outpainting_dims(video_guide_outpainting)
 
-    if server_config.get("fit_canvas", 0) == 2 and outpainting_dims is not None and any_letters(video_prompt_type, "VKF"):
+    if server_config.get("fit_canvas", 0) == 2 and outpainting_dims is not None:
         gr.Info("Output Resolution Cropping will be not used for this Generation as it is not compatible with Video Outpainting")
 
     if len(loras_multipliers) > 0:

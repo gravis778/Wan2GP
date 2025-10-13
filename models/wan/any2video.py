@@ -59,24 +59,7 @@ def timestep_transform(t, shift=5.0, num_timesteps=1000 ):
     new_t = new_t * num_timesteps
     return new_t
     
-def preprocess_sd_with_dtype(dtype, sd):
-    new_sd = {}
-    prefix_list = ["model.diffusion_model"]
-    end_list = [".norm3.bias", ".norm3.weight", ".norm_q.bias", ".norm_q.weight", ".norm_k.bias", ".norm_k.weight" ]
-    for k,v in sd.items():
-        for prefix in prefix_list:
-            if k.startswith(prefix): 
-                k = k[len(prefix)+1:]
-                break
-        if v.dtype in (torch.float8_e5m2, torch.float8_e4m3fn):
-            for endfix in end_list:
-                if k.endswith(endfix):
-                    v = v.to(dtype)
-                    break
-        if not k.startswith("vae."):
-            new_sd[k] = v
-    return new_sd
-
+    
 class WanAny2V:
 
     def __init__(
@@ -149,18 +132,15 @@ class WanAny2V:
         source2 = model_def.get("source2", None)
         module_source =  model_def.get("module_source", None)
         module_source2 =  model_def.get("module_source2", None)
-        def preprocess_sd(sd):
-            return preprocess_sd_with_dtype(dtype, sd)
-        kwargs= { "modelClass": WanModel,"do_quantize": quantizeTransformer and not save_quantized, "defaultConfigPath": base_config_file , "ignore_unused_weights": ignore_unused_weights, "writable_tensors": False, "default_dtype": dtype, "preprocess_sd": preprocess_sd, "forcedConfigPath": forcedConfigPath, }
-        kwargs_light= { "modelClass": WanModel,"writable_tensors": False, "preprocess_sd": preprocess_sd , "forcedConfigPath" : base_config_file}
+        kwargs= { "ignore_unused_weights": ignore_unused_weights, "writable_tensors": False, "default_dtype": dtype }
         if module_source is not None:
-            self.model = offload.fast_load_transformers_model(model_filename[:1] + [module_source], **kwargs)
+            self.model = offload.fast_load_transformers_model(model_filename[:1] + [module_source], modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath, **kwargs)
         if module_source2 is not None:
-            self.model2 = offload.fast_load_transformers_model(model_filename[1:2] + [module_source2], **kwargs)
+            self.model2 = offload.fast_load_transformers_model(model_filename[1:2] + [module_source2], modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath, **kwargs)
         if source is not None:
-            self.model = offload.fast_load_transformers_model(source,  **kwargs_light)
+            self.model = offload.fast_load_transformers_model(source, modelClass=WanModel, writable_tensors= False, forcedConfigPath= base_config_file)
         if source2 is not None:
-            self.model2 = offload.fast_load_transformers_model(source2, **kwargs_light)
+            self.model2 = offload.fast_load_transformers_model(source2, modelClass=WanModel, writable_tensors= False, forcedConfigPath= base_config_file)
 
         if self.model is not None or self.model2 is not None:
             from wgp import save_model
@@ -172,17 +152,17 @@ class WanAny2V:
                 
                 if 0 in submodel_no_list[2:]:
                     shared_modules= {}
-                    self.model = offload.fast_load_transformers_model(model_filename[:1], modules = model_filename[2:], return_shared_modules= shared_modules, **kwargs)
-                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = shared_modules, **kwargs)
+                    self.model = offload.fast_load_transformers_model(model_filename[:1], modules = model_filename[2:], modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath, return_shared_modules= shared_modules, **kwargs)
+                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = shared_modules, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath, **kwargs)
                     shared_modules = None
                 else:
                     modules_for_1 =[ file_name for file_name, submodel_no in zip(model_filename[2:],submodel_no_list[2:] ) if submodel_no ==1 ]
                     modules_for_2 =[ file_name for file_name, submodel_no in zip(model_filename[2:],submodel_no_list[2:] ) if submodel_no ==2 ]
-                    self.model = offload.fast_load_transformers_model(model_filename[:1], modules = modules_for_1, **kwargs)
-                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = modules_for_2, **kwargs)
+                    self.model = offload.fast_load_transformers_model(model_filename[:1], modules = modules_for_1, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath, **kwargs)
+                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = modules_for_2, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath, **kwargs)
 
             else:
-                self.model = offload.fast_load_transformers_model(model_filename,  **kwargs)
+                self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath, **kwargs)
         
 
         if self.model is not None:
@@ -449,6 +429,8 @@ class WanAny2V:
 
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
+        injection_denoising_step = bbargs.get("injection_denoising_step", 5)
+        inject_from_start = bbargs.get("inject_from_start", False)
         image_outputs = image_mode == 1
         kwargs = {'pipeline': self, 'callback': callback}
         color_reference_frame = None
@@ -481,7 +463,7 @@ class WanAny2V:
         # if NAG_scale > 1: context = torch.cat([context, context_NAG], dim=0)
         if self._interrupt: return None
 
-        vace = model_type in ["vace_1.3B","vace_14B", "vace_14B_2_2", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B"]
+        vace = model_type in ["vace_1.3B","vace_14B", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B"]
         phantom = model_type in ["phantom_1.3B", "phantom_14B"]
         fantasy = model_type in ["fantasy"]
         multitalk = model_type in ["multitalk", "infinitetalk", "vace_multitalk_14B", "i2v_2_2_multitalk"]
@@ -879,6 +861,8 @@ class WanAny2V:
             scheduler_kwargs = {} if isinstance(sample_scheduler, FlowMatchScheduler) else {"generator": seed_g}
         # b, c, lat_f, lat_h, lat_w
         latents = torch.randn(batch_size, *target_shape, dtype=torch.float32, device=self.device, generator=seed_g)
+        if 'source_latents' not in locals():
+            source_latents = latents.clone()
         if "G" in video_prompt_type: randn = latents
         if apg_switch != 0:  
             apg_momentum = -0.75
@@ -905,6 +889,7 @@ class WanAny2V:
             kwargs.update({"t": timestep, "current_step_no": i, "real_step_no": start_step_no + i })  
             kwargs["slg_layers"] = slg_layers if int(slg_start * sampling_steps) <= i < int(slg_end * sampling_steps) else None
 
+            randn = torch.randn_like(source_latents)
             if denoising_strength < 1 and i <= injection_denoising_step:
                 sigma = t / 1000
                 if inject_from_start:
